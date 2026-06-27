@@ -11,6 +11,15 @@ const { getFirestore, FieldValue } = require("firebase-admin/firestore");
 const app = express();
 app.use(express.json({ limit: "10mb" }));
 
+/* ── CORS — allow Netlify and any origin ── */
+app.use(function(req, res, next){
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Content-Type,apikey,Authorization");
+  if(req.method === "OPTIONS") return res.sendStatus(200);
+  next();
+});
+
 /* ── Firebase Admin (usa variável de ambiente) ── */
 const firebaseConfig = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT || "{}");
 let db;
@@ -35,7 +44,9 @@ app.post("/webhook", async (req, res) => {
 
   try {
     const body = req.body;
-    console.log("Webhook recebido:", JSON.stringify(body).substring(0, 300));
+    console.log("=== WEBHOOK RECEBIDO ===");
+    console.log(JSON.stringify(body).substring(0, 1000));
+    console.log("========================");
 
     /* Só processa mensagens recebidas (não enviadas por nós) */
     const event = body.event || body.type || "";
