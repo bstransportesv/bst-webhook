@@ -238,9 +238,10 @@ async function sendReply(jid, text) {
   const EVO_INST = process.env.EVO_INST || "bst-tracking";
 
   try {
+    const EVO_INST_TOKEN = process.env.EVO_INST_TOKEN || "C77DA501-AB7A-4A8F-A0D7-97B0837D21DB";
     const res = await fetch(`${EVO_URL}/message/sendText/${EVO_INST}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", apikey: EVO_KEY },
+      headers: { "Content-Type": "application/json", apikey: EVO_INST_TOKEN },
       body: JSON.stringify({ number: jid, text }),
     });
     const data = await res.json();
