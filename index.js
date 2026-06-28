@@ -1,17 +1,16 @@
 /*
   BST Tracking — Webhook Server
   Recebe mensagens da Evolution API e salva no Firebase
-  para que o sistema web exiba as respostas dos motoristas.
 */
 
 const express = require("express");
 const { initializeApp, cert } = require("firebase-admin/app");
-const { getFirestore, FieldValue } = require("firebase-admin/firestore");
+const { getFirestore } = require("firebase-admin/firestore");
 
 const app = express();
 app.use(express.json({ limit: "10mb" }));
 
-/* ── CORS — allow Netlify and any origin ── */
+/* ── CORS ── */
 app.use(function(req, res, next){
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
@@ -20,245 +19,235 @@ app.use(function(req, res, next){
   next();
 });
 
-/* ── Firebase Admin (usa variável de ambiente) ── */
-const firebaseConfig = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT || "{}");
+/* ── Firebase ── */
 let db;
 try {
-  initializeApp({ credential: cert(firebaseConfig) });
+  const sa = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT || "{}");
+  initializeApp({ credential: cert(sa) });
   db = getFirestore();
   console.log("Firebase conectado OK");
-} catch (e) {
+} catch(e) {
   console.error("Firebase erro:", e.message);
 }
 
-const REF_DEL = () => db.collection("sistema").doc("deliveries");
+const EVO_URL   = process.env.EVO_URL   || "https://evolution-api-production-4f04.up.railway.app";
+const EVO_KEY   = process.env.EVO_KEY   || "e33b722cda8840b081914391ef5e55bc7ee16d72f85e6559d4ab180073c10d27";
+const EVO_INST  = process.env.EVO_INST  || "bst-tracking";
+const EVO_INST_TOKEN = process.env.EVO_INST_TOKEN || "C77DA501-AB7A-4A8F-A0D7-97B0837D21DB";
 
 /* ── Health check ── */
 app.get("/", (req, res) => {
   res.json({ status: "ok", service: "BST Webhook Server", ts: new Date().toISOString() });
 });
 
-/* ── Webhook principal da Evolution API ── */
-app.post("/webhook", async (req, res) => {
-  res.sendStatus(200); /* responde imediatamente */
+/* ── Normaliza telefone: retorna apenas dígitos sem código país ── */
+function normPhone(tel) {
+  if(!tel) return "";
+  let d = tel.replace(/\D/g, "");
+  // Remove 55 do início se tiver 13 ou 12 dígitos
+  if(d.length === 13 && d.startsWith("55")) d = d.slice(2);
+  if(d.length === 12 && d.startsWith("55")) d = d.slice(2);
+  return d;
+}
 
+/* ── Compara telefones: últimos 8 dígitos ── */
+function phoneMatch(a, b) {
+  const da = normPhone(a);
+  const db2 = normPhone(b);
+  if(!da || !db2) return false;
+  return da.slice(-8) === db2.slice(-8);
+}
+
+/* ── Flow states ── */
+const flowStates = {};
+
+/* ── Webhook principal ── */
+app.post("/webhook", async (req, res) => {
+  res.sendStatus(200);
   try {
     const body = req.body;
-    console.log("=== WEBHOOK RECEBIDO ===");
-    console.log(JSON.stringify(body).substring(0, 1000));
-    console.log("========================");
+    const event = body.event || "";
+    console.log("=== WEBHOOK ===", event);
 
-    /* Só processa mensagens recebidas (não enviadas por nós) */
-    const event = body.event || body.type || "";
-    if (!event.includes("message") && !event.includes("MESSAGES")) return;
-
-    /* Extrai dados da mensagem */
-    const data = body.data || body;
-    const key = data.key || {};
-    if (key.fromMe) return; /* ignora mensagens enviadas */
-
-    const jid = key.remoteJid || "";
-    const phone = jid
-      .replace("@s.whatsapp.net", "")
-      .replace("@c.us", "")
-      .replace(/^55/, "");
-
-    const msg = data.message || {};
-    const text =
-      msg.conversation ||
-      (msg.extendedTextMessage && msg.extendedTextMessage.text) ||
-      (msg.buttonsResponseMessage && msg.buttonsResponseMessage.selectedDisplayText) ||
-      (msg.listResponseMessage && msg.listResponseMessage.title) ||
-      "";
-
-    if (!text || !phone) {
-      console.log("Mensagem ignorada - sem texto ou telefone");
+    /* Só processa eventos de mensagem */
+    if(!event.includes("MESSAGES_UPSERT") && !event.includes("message")) {
       return;
     }
 
-    console.log(`Mensagem de ${phone}: ${text}`);
+    const data = body.data || {};
+    const key  = data.key || {};
 
-    /* Busca as entregas no Firebase */
-    const delSnap = await REF_DEL().get();
-    if (!delSnap.exists) { console.log("Nenhuma entrega no Firebase"); return; }
+    /* Ignora mensagens enviadas por nós */
+    if(key.fromMe) return;
 
-    const delData = delSnap.data();
-    let deliveries = delData.items || [];
+    /* Extrai telefone */
+    const jid   = key.remoteJid || "";
+    const phone = normPhone(jid.replace("@s.whatsapp.net","").replace("@c.us",""));
 
-    /* Encontra a NF pendente do motorista pelo telefone */
-    /* Compara últimos 8 dígitos para tolerar variações de DDD+9 */
-    const phoneDigits = phone.replace(/\D/g, "");
-    
-    /* Mapa de telefones: precisamos do campo waPhones salvo pelo sistema */
-    const cfgSnap = await db.collection("sistema").doc("config").get();
+    /* Extrai texto */
+    const msg  = data.message || {};
+    const text = msg.conversation
+      || (msg.extendedTextMessage && msg.extendedTextMessage.text)
+      || (msg.buttonsResponseMessage && msg.buttonsResponseMessage.selectedDisplayText)
+      || (msg.listResponseMessage && msg.listResponseMessage.title)
+      || "";
+
+    if(!text || !phone) {
+      console.log("Ignorado - sem texto ou phone. jid:", jid, "text:", text);
+      return;
+    }
+
+    console.log(`Mensagem de ${phone}: "${text}"`);
+
+    /* Busca dados do Firebase */
+    const [delSnap, cfgSnap] = await Promise.all([
+      db.collection("sistema").doc("deliveries").get(),
+      db.collection("sistema").doc("config").get()
+    ]);
+
+    if(!delSnap.exists) { console.log("Sem deliveries no Firebase"); return; }
+
+    let deliveries = delSnap.data().items || [];
     const waPhones = (cfgSnap.exists && cfgSnap.data().waPhones) || {};
+
+    console.log("waPhones cadastrados:", JSON.stringify(waPhones));
+    console.log("Phone recebido:", phone);
 
     /* Encontra motorista pelo telefone */
     let matchMotorista = null;
-    for (const [nome, tel] of Object.entries(waPhones)) {
-      const telDigits = tel.replace(/\D/g, "");
-      if (telDigits.slice(-8) === phoneDigits.slice(-8)) {
+
+    /* 1. Busca no mapa waPhones */
+    for(const [nome, tel] of Object.entries(waPhones)) {
+      if(phoneMatch(tel, phone)) {
         matchMotorista = nome;
+        console.log("Match via waPhones:", nome, tel);
         break;
       }
     }
 
-    if (!matchMotorista) {
-      console.log(`Motorista não encontrado para telefone ${phone}`);
-      /* Salva mensagem em inbox não identificado para diagnóstico */
-      await db.collection("sistema").doc("inbox_unmatched").set(
-        { messages: FieldValue.arrayUnion({ phone, text, ts: new Date().toISOString() }) },
-        { merge: true }
-      );
+    if(!matchMotorista) {
+      console.log("Motorista não encontrado para telefone:", phone);
+      console.log("waPhones disponíveis:", JSON.stringify(waPhones));
       return;
     }
 
-    /* Encontra NF pendente deste motorista */
-    const matchDel = deliveries.find(
-      (d) => d.motorista === matchMotorista && !d.dtEntrega
+    /* Encontra NF pendente do motorista */
+    const matchDel = deliveries.find(d =>
+      d.motorista === matchMotorista && !d.dtEntrega
     );
 
-    if (!matchDel) {
-      console.log(`Nenhuma NF pendente para ${matchMotorista}`);
+    if(!matchDel) {
+      console.log("Nenhuma NF pendente para:", matchMotorista);
       return;
     }
 
-    /* Adiciona mensagem no chat da NF */
+    console.log("NF encontrada:", matchDel.nota, "motorista:", matchMotorista);
+
+    /* Registra mensagem recebida */
     const now = new Date().toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" });
-    const inMsg = {
-      dir: "in",
-      txt: text,
-      autor: matchMotorista,
-      ts: now,
-      auto: true,
-    };
+    const inMsg = { dir:"in", txt:text, autor:matchMotorista, ts:now, auto:true };
 
-    /* Processa resposta e gera reply automático */
-    const { reply, updates } = processReply(matchDel, text, now);
+    /* Processa resposta e gera reply */
+    const { reply, updates } = processReply(matchDel, text);
+    console.log("Reply gerado:", reply);
 
-    /* Atualiza deliveries */
-    deliveries = deliveries.map((d) => {
-      if (d.id !== matchDel.id) return d;
+    /* Atualiza entrega no array */
+    deliveries = deliveries.map(d => {
+      if(d.id !== matchDel.id) return d;
       const chatMsgs = [...(d.chatMsgs || []), inMsg];
-      
-      /* Adiciona reply do sistema no chat também */
-      if (reply) {
-        chatMsgs.push({
-          dir: "out",
-          txt: reply,
-          autor: "Sistema Automático",
-          ts: now,
-          auto: true,
-        });
-      }
-
+      if(reply) chatMsgs.push({ dir:"out", txt:reply, autor:"Sistema BST", ts:now, auto:true });
       return Object.assign({}, d, { chatMsgs }, updates || {});
     });
 
     /* Salva no Firebase */
-    await REF_DEL().set({ items: deliveries, nextId: delData.nextId }, { merge: true });
-    console.log(`Chat atualizado para NF ${matchDel.nota} — motorista ${matchMotorista}`);
+    await db.collection("sistema").doc("deliveries").set(
+      { items: deliveries, nextId: delSnap.data().nextId },
+      { merge: true }
+    );
+    console.log("Firebase atualizado OK");
 
-    /* Envia reply pelo WhatsApp se houver */
-    if (reply) {
-      await sendReply(jid, reply);
+    /* Envia reply pelo WhatsApp */
+    if(reply) {
+      await sendWhatsApp(jid, reply);
     }
 
-  } catch (e) {
-    console.error("Webhook error:", e.message);
+  } catch(e) {
+    console.error("Webhook error:", e.message, e.stack);
   }
 });
 
-/* ── Processar resposta do motorista ── */
-const flowStates = {};
-
-function processReply(d, text, now) {
+/* ── Processa resposta do motorista ── */
+function processReply(d, text) {
   const lower = text.toLowerCase().trim();
   const state = flowStates[d.id] || null;
   let reply = "";
   let updates = {};
 
-  /* Sim entregue */
-  if (text === "1" || lower.includes("sim") || lower.includes("entregue") || lower.includes("foi")) {
-    if (!d.dtEntrega) {
-      reply = "✅ Ótimo! Por favor informe a *data de entrega* no formato DD/MM/AAAA:";
+  if(text === "1" || lower.includes("sim") || lower.includes("entregue") || lower.includes("foi entregue")) {
+    if(!d.dtEntrega) {
+      reply = `✅ Ótimo ${d.motorista.split(" ")[0]}! Por favor informe a *data de entrega* no formato DD/MM/AAAA:`;
       flowStates[d.id] = "aguardando_data";
+    } else {
+      reply = `ℹ️ A NF ${d.nota} já está registrada como entregue em ${d.dtEntrega}.`;
     }
-  }
-  /* Não entregue */
-  else if (text === "2" || lower.includes("não") || lower.includes("nao") || lower.includes("ainda")) {
-    reply = `📅 Qual é a *data prevista* para realizar a entrega da NF ${d.nota}? (DD/MM/AAAA)`;
+  } else if(text === "2" || lower.includes("não") || lower.includes("nao") || lower.includes("ainda não")) {
+    reply = `📅 Qual é a *data prevista* para a entrega da NF ${d.nota}? (DD/MM/AAAA)`;
     flowStates[d.id] = "aguardando_data_prevista";
-  }
-  /* Problema */
-  else if (text === "3" || lower.includes("problem") || lower.includes("imprevisto")) {
-    reply = "⚠️ Descreva brevemente o problema para registrarmos e auxiliarmos:";
-    flowStates[d.id] = "aguardando_descricao_problema";
-  }
-  /* Data de entrega */
-  else if (state === "aguardando_data") {
+  } else if(text === "3" || lower.includes("problem") || lower.includes("imprevisto") || lower.includes("acidente")) {
+    reply = `⚠️ Entendido! Descreva brevemente o problema para registrarmos:`;
+    flowStates[d.id] = "aguardando_problema";
+  } else if(state === "aguardando_data") {
     const m = text.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/);
-    if (m) {
+    if(m) {
       const iso = `${m[3]}-${m[2].padStart(2,"0")}-${m[1].padStart(2,"0")}`;
       updates.dtEntrega = iso;
-      reply = `Obrigado! Data registrada ✅\nAgora informe o *nome completo e CPF* de quem recebeu a mercadoria:`;
+      reply = `📋 Data registrada! Agora informe o *nome completo e CPF* de quem recebeu a mercadoria:`;
       flowStates[d.id] = "aguardando_recebedor";
     } else {
-      reply = "Formato não reconhecido. Informe a data como *DD/MM/AAAA*:";
+      reply = `❌ Formato não reconhecido. Informe a data como *DD/MM/AAAA*:`;
     }
-  }
-  /* Data prevista */
-  else if (state === "aguardando_data_prevista") {
-    reply = `📌 Anotado! Aguardaremos a entrega. Obrigado! 👍`;
+  } else if(state === "aguardando_data_prevista") {
+    reply = `📌 Anotado! Entrega prevista para ${text}. Obrigado ${d.motorista.split(" ")[0]}! 👍`;
     flowStates[d.id] = null;
-  }
-  /* Recebedor */
-  else if (state === "aguardando_recebedor") {
+  } else if(state === "aguardando_recebedor") {
     updates.recebedor = text;
-    reply = `✅ Entrega da NF ${d.nota} registrada com sucesso! Obrigado! 🎉`;
+    reply = `✅ Perfeito! Entrega da NF ${d.nota} registrada com sucesso! Obrigado ${d.motorista.split(" ")[0]}! 🎉`;
     flowStates[d.id] = null;
-  }
-  /* Problema description */
-  else if (state === "aguardando_descricao_problema") {
-    reply = "📋 Ocorrência registrada! Nossa equipe entrará em contato. Obrigado por informar!";
+  } else if(state === "aguardando_problema") {
+    reply = `📋 Ocorrência registrada! Nossa equipe entrará em contato em breve. Obrigado por informar!`;
     flowStates[d.id] = null;
-  }
-  /* Mensagem não reconhecida */
-  else {
-    reply = `Mensagem recebida! Para informar sobre a NF ${d.nota}, responda:\n*1* — Sim, foi entregue\n*2* — Ainda não foi entregue\n*3* — Houve algum problema`;
+  } else {
+    reply = `Olá ${d.motorista.split(" ")[0]}! Sobre a NF ${d.nota} com destino ${d.cidade}/${d.estado}, responda:\n\n*1* — Sim, já foi entregue\n*2* — Ainda não foi entregue\n*3* — Houve algum problema`;
   }
 
   return { reply, updates };
 }
 
-/* ── Enviar reply pelo WhatsApp ── */
-async function sendReply(jid, text) {
-  const EVO_URL = process.env.EVO_URL || "https://evolution-api-production-4f04.up.railway.app";
-  const EVO_KEY = process.env.EVO_KEY || "e33b722cda8840b081914391ef5e55bc7ee16d72f85e6559d4ab180073c10d27";
-  const EVO_INST = process.env.EVO_INST || "bst-tracking";
-
+/* ── Envia mensagem pelo WhatsApp ── */
+async function sendWhatsApp(jid, text) {
   try {
-    const EVO_INST_TOKEN = process.env.EVO_INST_TOKEN || "C77DA501-AB7A-4A8F-A0D7-97B0837D21DB";
     const res = await fetch(`${EVO_URL}/message/sendText/${EVO_INST}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", apikey: EVO_INST_TOKEN },
-      body: JSON.stringify({ number: jid, text }),
+      headers: { "Content-Type": "application/json", "apikey": EVO_INST_TOKEN },
+      body: JSON.stringify({ number: jid, text })
     });
     const data = await res.json();
-    console.log("Reply enviado:", JSON.stringify(data).substring(0, 100));
-  } catch (e) {
-    console.error("sendReply error:", e.message);
+    console.log("WhatsApp enviado:", res.status, JSON.stringify(data).substring(0,100));
+  } catch(e) {
+    console.error("sendWhatsApp error:", e.message);
   }
 }
 
-/* ── Endpoint para salvar waPhones do sistema ── */
+/* ── Salva telefones vindos do sistema ── */
 app.post("/save-phones", async (req, res) => {
   try {
     const { waPhones } = req.body;
-    if (!waPhones) return res.status(400).json({ error: "waPhones required" });
+    if(!waPhones) return res.status(400).json({ error: "waPhones required" });
+    console.log("Salvando phones:", JSON.stringify(waPhones));
     await db.collection("sistema").doc("config").set({ waPhones }, { merge: true });
-    res.json({ ok: true });
-  } catch (e) {
+    res.json({ ok: true, saved: Object.keys(waPhones).length });
+  } catch(e) {
+    console.error("save-phones error:", e.message);
     res.status(500).json({ error: e.message });
   }
 });
