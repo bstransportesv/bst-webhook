@@ -50,9 +50,32 @@ function phoneMatch(a, b) {
   return da.slice(-8) === db2.slice(-8);
 }
 
-/* ── Estados de fluxo por motorista ── */
-/* { [motorista]: { step, nfs, selectedNfId } } */
+/* ── Estados de fluxo por motorista (persistido no Firebase) ── */
 const motoristFlow = {};
+
+async function getFlow(motorista) {
+  if(motoristFlow[motorista]) return motoristFlow[motorista];
+  try {
+    const snap = await db.collection("flows").doc(motorista.replace(/[^a-zA-Z0-9]/g,"_")).get();
+    if(snap.exists) { motoristFlow[motorista] = snap.data(); return snap.data(); }
+  } catch(e) {}
+  return { step: "inicio", selectedNfId: null };
+}
+
+async function saveFlow(motorista, flow) {
+  motoristFlow[motorista] = flow;
+  try {
+    await db.collection("flows").doc(motorista.replace(/[^a-zA-Z0-9]/g,"_")).set(flow);
+  } catch(e) { console.error("saveFlow error:", e.message); }
+}
+
+async function clearFlow(motorista) {
+  const f = { step: "inicio", selectedNfId: null };
+  motoristFlow[motorista] = f;
+  try {
+    await db.collection("flows").doc(motorista.replace(/[^a-zA-Z0-9]/g,"_")).set(f);
+  } catch(e) {}
+}
 
 app.get("/", (req, res) => {
   res.json({ status: "ok", service: "BST Webhook v4", ts: new Date().toISOString() });
@@ -121,8 +144,8 @@ app.post("/webhook", async (req, res) => {
     const nfsPendentes = deliveries.filter(d => d.motorista === matchMotorista && !d.dtEntrega);
     const now = new Date().toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" });
 
-    /* Estado atual do fluxo */
-    let flow = motoristFlow[matchMotorista] || { step: "inicio", nfs: nfsPendentes, selectedNfId: null };
+    /* Estado atual do fluxo (persistido no Firebase) */
+    let flow = await getFlow(matchMotorista);
     flow.nfs = nfsPendentes; /* atualiza sempre */
 
     let reply = "";
@@ -140,7 +163,7 @@ app.post("/webhook", async (req, res) => {
       reply = `Olá ${matchMotorista.split(" ")[0]}! 👋\n\nRecebi sua mensagem, mas não consigo processar mídia automaticamente.\n\nPor favor responda com texto ou entre em contato com a *Equipe BST Transportes*.`;
       if(flow.selectedNfId) addMsg(flow.selectedNfId, "in", "[Mídia recebida]");
       if(flow.selectedNfId) addMsg(flow.selectedNfId, "out", reply);
-      motoristFlow[matchMotorista] = flow;
+      await saveFlow(matchMotorista, flow);
       await sendWA(jid, reply);
       await updateFirebase(deliveries, delSnap, chatMsgsByNfId, updatesById);
       return;
@@ -179,7 +202,7 @@ app.post("/webhook", async (req, res) => {
           addMsg(nf.id, "out", reply);
         });
       }
-      motoristFlow[matchMotorista] = flow;
+      await saveFlow(matchMotorista, flow);
       await sendWA(jid, reply);
       await updateFirebase(deliveries, delSnap, chatMsgsByNfId, updatesById);
       return;
@@ -210,7 +233,7 @@ app.post("/webhook", async (req, res) => {
           nfsPendentes.forEach(nf => { addMsg(nf.id, "in", text); addMsg(nf.id, "out", reply); });
         }
       }
-      motoristFlow[matchMotorista] = flow;
+      await saveFlow(matchMotorista, flow);
       await sendWA(jid, reply);
       await updateFirebase(deliveries, delSnap, chatMsgsByNfId, updatesById);
       return;
@@ -237,7 +260,7 @@ app.post("/webhook", async (req, res) => {
         reply = "Responda *1* (todas entregues), *2* (nenhuma entregue) ou *3* (informar individual).";
         nfsPendentes.forEach(nf => { addMsg(nf.id, "in", text); addMsg(nf.id, "out", reply); });
       }
-      motoristFlow[matchMotorista] = flow;
+      await saveFlow(matchMotorista, flow);
       await sendWA(jid, reply);
       await updateFirebase(deliveries, delSnap, chatMsgsByNfId, updatesById);
       return;
@@ -258,7 +281,7 @@ app.post("/webhook", async (req, res) => {
         reply = `❌ Data não reconhecida. Informe no formato *DD/MM/AAAA*:`;
         nfsPendentes.forEach(nf => { addMsg(nf.id, "in", text); addMsg(nf.id, "out", reply); });
       }
-      motoristFlow[matchMotorista] = flow;
+      await saveFlow(matchMotorista, flow);
       await sendWA(jid, reply);
       await updateFirebase(deliveries, delSnap, chatMsgsByNfId, updatesById);
       return;
@@ -278,7 +301,7 @@ app.post("/webhook", async (req, res) => {
         reply = `❌ Data não reconhecida. Informe no formato *DD/MM/AAAA*:`;
         nfsPendentes.forEach(nf => { addMsg(nf.id, "in", text); addMsg(nf.id, "out", reply); });
       }
-      motoristFlow[matchMotorista] = flow;
+      await saveFlow(matchMotorista, flow);
       await sendWA(jid, reply);
       await updateFirebase(deliveries, delSnap, chatMsgsByNfId, updatesById);
       return;
@@ -292,7 +315,7 @@ app.post("/webhook", async (req, res) => {
       });
       reply = `✅ *${nfsPendentes.length} entregas* registradas com sucesso! Muito obrigado ${matchMotorista.split(" ")[0]}! 🎉`;
       flow.step = "inicio"; flow.selectedNfId = null;
-      motoristFlow[matchMotorista] = flow;
+      await saveFlow(matchMotorista, flow);
       await sendWA(jid, reply);
       await updateFirebase(deliveries, delSnap, chatMsgsByNfId, updatesById);
       return;
@@ -302,7 +325,7 @@ app.post("/webhook", async (req, res) => {
     const selectedNf = deliveries.find(d => d.id === flow.selectedNfId);
     if(!selectedNf) {
       flow.step = "inicio"; flow.selectedNfId = null;
-      motoristFlow[matchMotorista] = flow;
+      await saveFlow(matchMotorista, flow);
       reply = "Ocorreu um erro. Por favor inicie novamente enviando qualquer mensagem.";
       await sendWA(jid, reply);
       return;
@@ -330,7 +353,7 @@ app.post("/webhook", async (req, res) => {
     }
     addMsg(selectedNf.id, "out", result.reply);
 
-    motoristFlow[matchMotorista] = flow;
+    await saveFlow(matchMotorista, flow);
     await sendWA(jid, reply);
     await updateFirebase(deliveries, delSnap, chatMsgsByNfId, updatesById);
 
