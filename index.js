@@ -110,6 +110,8 @@ app.post("/webhook", async (req,res) => {
     if(key.fromMe) return;
 
     const jid   = key.remoteJid||"";
+    /* Ignora mensagens de grupos (JID termina em @g.us) */
+    if(jid.endsWith("@g.us")) { console.log("Ignorado - mensagem de grupo:", jid); return; }
     const phone = normPhone(jid.replace(/@s\.whatsapp\.net|@c\.us/g,""));
     const msg   = data.message||{};
     const isMedia = !!(msg.audioMessage||msg.imageMessage||msg.videoMessage||msg.documentMessage||msg.stickerMessage);
@@ -434,6 +436,23 @@ app.post("/save-delivery-phone", async (req,res) => {
     await db.collection("sistema").doc("config").set(upd,{merge:true});
     console.log("Delivery phone saved:", motorista, phone);
     res.json({ok:true});
+  } catch(e) { res.status(500).json({error:e.message}); }
+});
+
+/* ── Ligar/desligar envio automatico ── */
+app.post("/set-auto-send", async (req,res) => {
+  try {
+    const { enabled } = req.body;
+    await db.collection("sistema").doc("config").set({ autoSendEnabled: !!enabled }, { merge:true });
+    console.log("Auto-send set to:", enabled);
+    res.json({ ok:true, enabled: !!enabled });
+  } catch(e) { res.status(500).json({error:e.message}); }
+});
+
+app.get("/auto-send-status", async (req,res) => {
+  try {
+    const cfg = await getConfig();
+    res.json({ enabled: !!cfg.autoSendEnabled });
   } catch(e) { res.status(500).json({error:e.message}); }
 });
 
