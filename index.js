@@ -269,14 +269,17 @@ app.post("/webhook", async (req,res) => {
       if(m) {
         updDels=updDels.map(d=>d.id===nf.id?{...d,dtPrevisao:text}:d);
         reply=`📌 Previsão *${text}* registrada para NF ${nf.nota}!\nObrigado ${nome}! 👍`;
-        // Vai para próxima NF pendente
-        const proximas=nfsPend.filter(d=>d.id!==nf.id&&!updDels.find(u=>u.id===d.id)?.dtEntrega);
+        /* Marca esta NF como processada nesta sessão */
+        const processadas = [...(flow.processadas||[]), nf.id];
+        /* Vai para próxima NF pendente que ainda não foi processada */
+        const proximas=nfsPend.filter(d=>!processadas.includes(d.id));
         if(proximas.length>0) {
           const prox=proximas[0];
-          await setFlow(flowKey,{step:"aguardando_status",nfIdx:flow.nfIdx+1,selectedNfId:prox.id});
+          await setFlow(flowKey,{step:"aguardando_status",nfIdx:flow.nfIdx+1,selectedNfId:prox.id,processadas});
           reply+=`\n\n---\nSobre a *NF ${prox.nota}* — ${prox.cidade}/${prox.estado}:\n\n*1* — Entregue ✅\n*2* — Não entregue 📅\n*3* — Problema ⚠️`;
           updDels=await addChatMsg(updDels,prox.id,"out",reply,"Sistema BST",ts);
         } else {
+          reply+=`\n\n🎉 Todas as suas entregas pendentes foram informadas. Obrigado!`;
           await resetFlow(flowKey);
         }
       } else {
@@ -295,15 +298,16 @@ app.post("/webhook", async (req,res) => {
       updDels=await addChatMsg(updDels,nf.id,"in",text,motorista,ts);
       updDels=updDels.map(d=>d.id===nf.id?{...d,recebedor:text}:d);
       reply=`✅ Entrega da NF ${nf.nota} registrada!\nObrigado ${nome}! 🎉`;
-      // Vai para próxima NF pendente
-      const proximas=nfsPend.filter(d=>d.id!==nf.id);
-      const proximasPend=proximas.filter(d=>!updDels.find(u=>u.id===d.id)?.dtEntrega);
-      if(proximasPend.length>0) {
-        const prox=proximasPend[0];
-        await setFlow(flowKey,{step:"aguardando_status",nfIdx:flow.nfIdx+1,selectedNfId:prox.id});
+      /* Marca esta NF como processada (já tem dtEntrega agora) */
+      const processadas = [...(flow.processadas||[]), nf.id];
+      const proximas=nfsPend.filter(d=>!processadas.includes(d.id));
+      if(proximas.length>0) {
+        const prox=proximas[0];
+        await setFlow(flowKey,{step:"aguardando_status",nfIdx:flow.nfIdx+1,selectedNfId:prox.id,processadas});
         reply+=`\n\n---\nSobre a *NF ${prox.nota}* — ${prox.cidade}/${prox.estado}:\n\n*1* — Entregue ✅\n*2* — Não entregue 📅\n*3* — Problema ⚠️`;
         updDels=await addChatMsg(updDels,prox.id,"out",reply,"Sistema BST",ts);
       } else {
+        reply+=`\n\n🎉 Todas as suas entregas pendentes foram informadas. Obrigado!`;
         await resetFlow(flowKey);
       }
       updDels=await addChatMsg(updDels,nf.id,"out",reply,"Sistema BST",ts);
@@ -319,13 +323,15 @@ app.post("/webhook", async (req,res) => {
       updDels=await addChatMsg(updDels,nf.id,"in",text,motorista,ts);
       updDels=updDels.map(d=>d.id===nf.id?{...d,ocorrencia:text}:d);
       reply=`📋 Ocorrência registrada para NF ${nf.nota}.\nNossa *Equipe BST Transportes* entrará em contato. Obrigado!`;
-      const proximasPend=nfsPend.filter(d=>d.id!==nf.id);
-      if(proximasPend.length>0) {
-        const prox=proximasPend[0];
-        await setFlow(flowKey,{step:"aguardando_status",nfIdx:flow.nfIdx+1,selectedNfId:prox.id});
+      const processadas = [...(flow.processadas||[]), nf.id];
+      const proximas=nfsPend.filter(d=>!processadas.includes(d.id));
+      if(proximas.length>0) {
+        const prox=proximas[0];
+        await setFlow(flowKey,{step:"aguardando_status",nfIdx:flow.nfIdx+1,selectedNfId:prox.id,processadas});
         reply+=`\n\n---\nSobre a *NF ${prox.nota}* — ${prox.cidade}/${prox.estado}:\n\n*1* — Entregue ✅\n*2* — Não entregue 📅\n*3* — Problema ⚠️`;
         updDels=await addChatMsg(updDels,prox.id,"out",reply,"Sistema BST",ts);
       } else {
+        reply+=`\n\n🎉 Todas as suas entregas pendentes foram informadas. Obrigado!`;
         await resetFlow(flowKey);
       }
       updDels=await addChatMsg(updDels,nf.id,"out",reply,"Sistema BST",ts);
