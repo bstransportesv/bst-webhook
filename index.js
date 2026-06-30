@@ -112,6 +112,16 @@ app.post("/webhook", async (req,res) => {
     const jid   = key.remoteJid||"";
     /* Ignora mensagens de grupos (JID termina em @g.us) */
     if(jid.endsWith("@g.us")) { console.log("Ignorado - mensagem de grupo:", jid); return; }
+
+    /* ── INTERRUPTOR GERAL ──
+       Se o envio automatico estiver desligado no sistema, o bot fica
+       totalmente mudo: nao inicia conversas E nao responde nada. */
+    const cfgCheck = await getConfig();
+    if(!cfgCheck.autoSendEnabled) {
+      console.log("Bot desligado (autoSendEnabled=false) - mensagem ignorada totalmente");
+      return;
+    }
+
     const phone = normPhone(jid.replace(/@s\.whatsapp\.net|@c\.us/g,""));
     const msg   = data.message||{};
     const isMedia = !!(msg.audioMessage||msg.imageMessage||msg.videoMessage||msg.documentMessage||msg.stickerMessage);
@@ -123,7 +133,7 @@ app.post("/webhook", async (req,res) => {
     console.log(`De ${phone}: "${text}" media:${isMedia}`);
 
     /* Identifica motorista */
-    const [deliveries, cfg] = await Promise.all([getDeliveries(), getConfig()]);
+    const [deliveries, cfg] = await Promise.all([getDeliveries(), Promise.resolve(cfgCheck)]);
     const waPhones = cfg.waPhones||{};
 
     let motorista = null;
